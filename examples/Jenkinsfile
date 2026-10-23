@@ -1,0 +1,66 @@
+pipeline {
+    agent none
+    environment {
+        PLUGIN_NAME = "com.example.plugin"
+        IDEMPIERE_VERSION = "12.0.0"
+        CI_TOOL_REPOSITORY = "https://github.com/alaracds/idempiere-plugin-ci.git"
+        CI_TOOL_VERSION = "v0.1.0"
+    }
+    stages {
+        stage('Validate') {
+            agent {
+                docker {
+                    image 'carl0jgr/idempiere-source-builder:12'
+                    args '--entrypoint=\'\' -v /var/jenkins_home/.m2:/m2 -e MAVEN_OPTS=-Dmaven.repo.local=/m2'
+                }
+            }
+            steps {
+                dir('.ci-tool') {
+                    git branch: "${CI_TOOL_VERSION}", url: "${CI_TOOL_REPOSITORY}"
+                }
+                sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" validate-branch "${BRANCH_NAME}" "${CHANGE_BRANCH:-}" "${CHANGE_TARGET:-}"'
+                sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" validate'
+            }
+        }
+        stage('Compile') {
+            agent {
+                docker {
+                    image 'carl0jgr/idempiere-source-builder:12'
+                    args '--entrypoint=\'\' -v /var/jenkins_home/.m2:/m2 -e MAVEN_OPTS=-Dmaven.repo.local=/m2'
+                }
+            }
+            steps {
+                dir('.ci-tool') {
+                    git branch: "${CI_TOOL_VERSION}", url: "${CI_TOOL_REPOSITORY}"
+                }
+                dir('target-platform') {
+                    git branch: '12.0', url: 'https://github.com/ingeint/idempiere-target-platform-plugin.git'
+                }
+                sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" compile "$WORKSPACE/target-platform"'
+                sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" validate-artifacts "$WORKSPACE/target-platform/target" "${BUILD_NUMBER}"'
+                sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" package-artifacts "$WORKSPACE/target-platform/target" "$WORKSPACE/target-platform/release" "${BRANCH_NAME}" "${BUILD_NUMBER}"'
+                archiveArtifacts artifacts: 'target-platform/release/*', fingerprint: true
+                junit testResults: "${PLUGIN_NAME}.test/target/surefire-reports/*.xml", allowEmptyResults: false
+            }
+            post {
+                always {
+                    sh 'rm -rf target-platform/target target-platform/release "${PLUGIN_NAME}/target" "${PLUGIN_NAME}.test/target"'
+                }
+            }
+        }
+        stage('Validate 2Pack Database') {
+            agent { label 'idempiere-db-validation' }
+            when {
+                expression { return env.RUN_2PACK_DATABASE_VALIDATION == 'true' }
+            }
+            steps {
+                dir('.ci-tool') {
+                    git branch: "${CI_TOOL_VERSION}", url: "${CI_TOOL_REPOSITORY}"
+                }
+                withCredentials([string(credentialsId: 'idempiere-ci-db-password', variable: 'PGPASSWORD')]) {
+                    sh '.ci-tool/bin/idempiere-plugin-ci --project-dir "$WORKSPACE" validate-2pack-db'
+                }
+            }
+        }
+    }
+}
